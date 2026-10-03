@@ -1,9 +1,9 @@
 /*
-    License: MIT Licence
+   License: MIT Licence
 
-    References:
-        - https://github.com/LloydLabs/delete-self-poc
-        - https://twitter.com/jonasLyk/status/1350401461985955840
+   References:
+       - https://github.com/LloydLabs/delete-self-poc
+       - https://twitter.com/jonasLyk/status/1350401461985955840
 */
 
 
@@ -12,6 +12,7 @@ package selfdelete
 import (
 	"fmt"
 	"unsafe"
+
 	"golang.org/x/sys/windows"
 )
 
@@ -27,11 +28,11 @@ type FILE_RENAME_INFO struct {
 }
 
 
-type FILE_DISPOSITION_INFO struct {
-	DeleteFile bool
+type FILE_DISPOSITION_INFO_EX struct {
+	Flags uint32
 }
 
-
+// INTERNAL: Opens handle to target file
 func dsOpenHandle(pwPath *uint16) (windows.Handle, error) {
 	handle, err := windows.CreateFile(
 		pwPath, 
@@ -50,7 +51,7 @@ func dsOpenHandle(pwPath *uint16) (windows.Handle, error) {
 	return handle, nil
 }
 
-
+// INTERNAL: Changes target file's DataStream to ":deadbeef"
 func dsRenameHandle(hHandle windows.Handle) error {
 	var fRename FILE_RENAME_INFO
 	DS_STREAM_RENAME, err := windows.UTF16FromString(":deadbeef")
@@ -82,64 +83,62 @@ func dsRenameHandle(hHandle windows.Handle) error {
 	return nil
 }
 
-
+// INTERNAL: Removes file by applying "POSIX" file treating on windows FS
 func dsDepositeHandle(hHandle windows.Handle) error {
-	var fDelete FILE_DISPOSITION_INFO
-	fDelete.DeleteFile = true
+	var fdiEx FILE_DISPOSITION_INFO_EX
+	fdiEx.Flags = windows.FILE_DISPOSITION_DELETE | windows.FILE_DISPOSITION_POSIX_SEMANTICS
+	var ioStatusBlock2 windows.IO_STATUS_BLOCK
 
-	err := windows.SetFileInformationByHandle(
-		hHandle, 
-		windows.FileDispositionInfo, 
-		(*byte)(unsafe.Pointer(&fDelete)), 
-		uint32(unsafe.Sizeof(fDelete)),
-	)
-	
-	if err != nil {
+	if err := windows.NtSetInformationFile(hHandle,&ioStatusBlock2,(*byte)(unsafe.Pointer(&fdiEx)),
+	uint32(unsafe.Sizeof(fdiEx)),windows.FileDispositionInformationEx); err != nil{
 		return err
 	}
 
 	return nil
 }
 
-
-func SelfDeleteExe() error {
+// PUBLIC: Full windows "active" EXE self-removal
+func SelfDeleteExe() error{
+	// Get full executable path via GetModuleFileName windows API
 	var wcPath [windows.MAX_PATH + 1]uint16
 	var hCurrent windows.Handle
 
 	_, err := windows.GetModuleFileName(0, &wcPath[0], windows.MAX_PATH)
 	if err != nil {
-		return err
+		return fmt.Errorf("SelfDeleteExe error: Get executable fullPath error: %v",err)
 	}
 
+	// Open handle to exe file
 	hCurrent, err = dsOpenHandle(&wcPath[0])
 	if err != nil || hCurrent == windows.InvalidHandle {
-		return err
+		return fmt.Errorf("SelfDeleteExe error: Open exe file handle error: %v",err)
 	}
 	
+	// Move all exe contents to a windows alternate DATA STREAM
 	err = dsRenameHandle(hCurrent)
 	if err != nil {
 		windows.CloseHandle(hCurrent)
-		return err
+		return fmt.Errorf("SelfDeleteExe error: DataStream change error: %v",err)
 	}
 
+	// Close handle to exe file
 	windows.CloseHandle(hCurrent)
 
+	// Reopen exe file
 	hCurrent, err = dsOpenHandle(&wcPath[0])
 	if err != nil || hCurrent == windows.InvalidHandle {
-		return err
+		return fmt.Errorf("SelfDeleteExe error: Reopen exe file handle error: %v",err)
 	}
 
+	// Apply POSIX file treatment and DELETE flags to handle to allow self-removal when closing the handle
 	err = dsDepositeHandle(hCurrent)
 	if err != nil {
 		windows.CloseHandle(hCurrent)
-		return err
+		return fmt.Errorf("SelfDeleteExe error: Apply DELETE and POSIX_SEMANTICS to handle error: %v",err)
 	}
 
+	// Close handle, effectively "tricking" windows to finally remove our exe file on disk (while still being loaded on mem)
 	windows.CloseHandle(hCurrent)
-
-	fmt.Println("Self deletion is successful. Program still running, hit key to continue")
-	str := ""
-	fmt.Scanln(&str)
 
 	return nil
 }
